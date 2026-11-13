@@ -184,6 +184,8 @@ def main() -> None:
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--ids", nargs="+", help="Run exactly these sample IDs in the given order")
     parser.add_argument("--check-finish", action="store_true", help="Check the first finish before accepting it")
+    parser.add_argument("--system-prompt-file", type=Path)
+    parser.add_argument("--user-template-file", type=Path)
     parser.add_argument("--caller-checklist", action="store_true", help="Try concise write and finish rules")
     parser.add_argument("--asr-corrections", action="store_true", help="Add a short ASR interpretation rule")
     parser.add_argument("--debug-trace", type=Path, help="Print caller decisions and tool results and save a JSONL trace")
@@ -301,6 +303,11 @@ def main() -> None:
             1,
         )
         print("checklist prompt sha256:", hashlib.sha256(discovery_prompt.encode()).hexdigest())
+    if args.system_prompt_file:
+        discovery_prompt = args.system_prompt_file.read_text(encoding="utf-8")
+    if discovery_prompt is not None:
+        print("active system prompt sha256:", hashlib.sha256(discovery_prompt.encode()).hexdigest())
+    user_template = args.user_template_file.read_text(encoding="utf-8") if args.user_template_file else None
     caller = Caller(
         cache or caller_view,
         catalog,
@@ -310,6 +317,7 @@ def main() -> None:
         collect_metrics=True,
         capture_prompts=bool(args.debug_trace),
         discovery_prompt=discovery_prompt,
+        user_template=user_template,
     )
     agent = LifeMateAgent(catalog, caller, config=config)
     print(f"load model: {int((time.perf_counter() - started) * 1000)} ms", flush=True)

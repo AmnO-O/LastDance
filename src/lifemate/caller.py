@@ -187,6 +187,7 @@ class Caller:
         capture_prompts: bool = False,
         collect_metrics: bool = False,
         discovery_prompt: str | None = None,
+        user_template: str | None = None,
     ):
         self.backend = backend
         self.catalog = catalog
@@ -199,6 +200,7 @@ class Caller:
         self.capture_prompts = capture_prompts
         self.collect_metrics = collect_metrics
         self.discovery_prompt = discovery_prompt
+        self.user_template = user_template
 
     def check_finish(self, prepared: PreparedSample, trace: Iterable[ToolRecord]) -> dict[str, Any]:
         messages = [
@@ -250,6 +252,7 @@ class Caller:
             roadmap=roadmap,
             discovery=discovery,
             discovered_tools=discovered_tools,
+            user_template=self.user_template,
         )
         started = time.perf_counter()
         if discovery and self.discovery_prompt is not None:
