@@ -7,6 +7,25 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+# Prompt-only details checked against the released simulator.
+RESULT_HINTS = {
+    "email.list": "emails[]: id, from_name, subject. Dùng id để đọc, trả lời hoặc sửa email.",
+    "email.read": "email: thông tin email và body.",
+    "email.archive": "archive: {ok, item}; delete: {ok} khi thành công.",
+    "tasks.list": "tasks[]: id, title, due, done. Dùng due làm mốc hạn nếu được nhắc tới.",
+    "tasks.add": "{ok, id, item}; item.due là hạn của công việc vừa tạo.",
+    "reminders.list": "reminders[]: id, content, time, repeat, done.",
+    "reminders.create": "{ok, id, item}; item.time là giờ nhắc đã lưu.",
+    "fuel_price.get_price": "prices[]: type và price.",
+}
+PARAMETER_HINTS = {
+    "email.archive": {
+        "email_id": "Lấy từ emails[].id của email.list.",
+        "action": "archive: lưu trữ; delete: xóa.",
+    },
+}
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -37,12 +56,20 @@ class ToolSpec:
 
     def prompt_schema(self) -> dict[str, Any]:
         """The full executable schema shown to the caller (not every catalog tool)."""
+        parameters = self.parameters
+        hints = PARAMETER_HINTS.get(self.name)
+        if hints:
+            properties = {
+                name: {**prop, "description": hints[name]} if name in hints else prop
+                for name, prop in self.properties.items()
+            }
+            parameters = {**parameters, "properties": properties}
         return {
             "name": self.name,
             "kind": self.kind,
             "description": self.description,
-            "parameters": self.parameters,
-            "returns": self.returns,
+            "parameters": parameters,
+            "returns": RESULT_HINTS.get(self.name, self.returns),
         }
 
 
@@ -126,7 +153,8 @@ def render_tool_schema(tool: ToolSpec, description_chars: int = 130) -> str:
     x-ref ids, one-of groups, defaults) at roughly half the tokens.
     """
     lines = [f"{tool.name} [{tool.kind}] {_short_text(tool.description, description_chars)}"]
-    for key, prop in tool.properties.items():
+    schema = tool.prompt_schema()
+    for key, prop in (schema["parameters"].get("properties") or {}).items():
         mark = _arg_mark(tool, key)
         type_text = _sig_type(prop)
         extras: list[str] = []
@@ -147,8 +175,8 @@ def render_tool_schema(tool: ToolSpec, description_chars: int = 130) -> str:
         lines.append(line)
     if tool.one_of:
         lines.append("  one_of: " + " | ".join("+".join(group) for group in tool.one_of))
-    if tool.returns:
-        lines.append("  -> " + _short_text(tool.returns, 80))
+    if schema["returns"]:
+        lines.append("  -> " + _short_text(schema["returns"], 80))
     return "\n".join(lines)
 
 

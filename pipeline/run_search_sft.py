@@ -39,7 +39,7 @@ from lifemate import discovery
 from lifemate.prompts import DISCOVERY_USER_TEMPLATE, SFT_SYSTEM_PROMPT
 import hashlib
 from lifemate.caller import Caller
-from lifemate.catalog import Catalog
+from lifemate.catalog import Catalog, PARAMETER_HINTS, RESULT_HINTS
 from lifemate.data import catalog_path, read_transcript_file
 from lifemate.llm import ScriptedBackend
 from lifemate.runtime import AgentConfig, LifeMateAgent, make_tool_env
@@ -99,7 +99,7 @@ class ReplayRejected(Exception):
 
 def configure_sft_prompt():
     configure()
-    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE], ensure_ascii=False)
+    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, PARAMETER_HINTS, RESULT_HINTS], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(pair.encode("utf-8")).hexdigest()
 
 
