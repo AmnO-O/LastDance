@@ -36,7 +36,7 @@ from pipeline.runtime_utils import (
 )
 
 from lifemate import discovery
-from lifemate.prompts import DISCOVERY_USER_TEMPLATE, SFT_SYSTEM_PROMPT
+from lifemate.prompts import DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC, SFT_SYSTEM_PROMPT
 import hashlib
 from lifemate.caller import Caller
 from lifemate.catalog import Catalog
@@ -99,7 +99,7 @@ class ReplayRejected(Exception):
 
 def configure_sft_prompt():
     configure()
-    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, sha(REPO / "src" / "lifemate" / "catalog.py")], ensure_ascii=False, sort_keys=True)
+    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC.prompt_schema(), sha(REPO / "src" / "lifemate" / "catalog.py")], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(pair.encode("utf-8")).hexdigest()
 
 

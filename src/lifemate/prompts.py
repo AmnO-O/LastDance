@@ -272,7 +272,7 @@ SEARCH_TOOL_SPEC = ToolSpec(
         },
         "required": ["query"],
     },
-    returns="tools[]",
+    returns="tools[]: Tên các tool phù hợp nhất với query, theo thứ tự xếp hạng. Schema của chúng xuất hiện ở lượt kế tiếp.",
 )
 
 SEARCH_EXAMPLES = """SEARCH
