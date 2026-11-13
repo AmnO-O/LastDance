@@ -184,6 +184,7 @@ def main() -> None:
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--ids", nargs="+", help="Run exactly these sample IDs in the given order")
     parser.add_argument("--check-finish", action="store_true", help="Check the first finish before accepting it")
+    parser.add_argument("--caller-checklist", action="store_true", help="Try concise write and finish rules")
     parser.add_argument("--asr-corrections", action="store_true", help="Add a short ASR interpretation rule")
     parser.add_argument("--debug-trace", type=Path, help="Print caller decisions and tool results and save a JSONL trace")
     parser.add_argument("--no-cache", action="store_true", help="Disable the request-local prefix cache")
@@ -290,6 +291,16 @@ def main() -> None:
             "If ambiguity changes a write, ask before acting."
         )
         print("effective caller prompt sha256:", hashlib.sha256(discovery_prompt.encode()).hexdigest())
+    if args.caller_checklist:
+        discovery_prompt = discovery_prompt or prompts.discovery_system(prompts.CALLER_SYSTEM)
+        discovery_prompt = discovery_prompt.replace(
+            "ACTION RULES\n",
+            "ACTION RULES\n"
+            "- Before a write, follow the user's latest clear instruction, including corrections.\n"
+            "- Before finish, match each requested action to successful tool results.\n",
+            1,
+        )
+        print("checklist prompt sha256:", hashlib.sha256(discovery_prompt.encode()).hexdigest())
     caller = Caller(
         cache or caller_view,
         catalog,
