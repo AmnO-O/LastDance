@@ -344,19 +344,19 @@ def discovery_system(system: str) -> str:
 DISCOVERY_USER_TEMPLATE = """CONTEXT
 ${context}
 
-FULL TOOL SCHEMAS (authoritative)
-${tool_schemas}
-
-CONVERSATION HISTORY (already applied to the initial state)
+CONVERSATION HISTORY
 ${history}
 
 CURRENT REQUEST
 ${request}
 
-${roadmap}EXECUTION TRACE FOR THE CURRENT REQUEST
+EXECUTION TRACE FOR THE CURRENT REQUEST
 ${trace}
 
-${discovered_section}STEP ${step}/${max_steps}. Choose the single next action."""
+FULL TOOL SCHEMAS (authoritative)
+${tool_schemas}
+
+STEP ${step}/${max_steps}. Output exactly one next action."""
 
 
 def caller_messages(
@@ -452,8 +452,16 @@ def caller_messages(
             "\n".join(render_tool_schema(catalog.tools[s["name"]]) for s in discovered)
             if schema_style == "dsl" else _json(discovered, pretty=True)
         )
+        separate_schemas = "discovered_section" in Template(user_template).get_identifiers()
+        combined = full + discovered
+        tool_schemas = focus_text
+        if discovered and not separate_schemas:
+            tool_schemas = (
+                "\n".join(render_tool_schema(catalog.tools[schema["name"]]) for schema in combined)
+                if schema_style == "dsl" else _json(combined, pretty=True)
+            )
         user = Template(user_template).substitute(
-            context=render_context(sample), tool_schemas=focus_text,
+            context=render_context(sample), tool_schemas=tool_schemas,
             history=render_history(prepared, include_results=True, max_chars=max_history_chars),
             request=prepared.request_text, roadmap=f"{roadmap}\n\n" if roadmap else "",
             trace=render_trace(trace, notes=notes),
