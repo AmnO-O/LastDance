@@ -177,7 +177,9 @@ def main() -> None:
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--model-path", default=None)
-    parser.add_argument("--adapter-path", default=None)
+    adapters = parser.add_mutually_exclusive_group()
+    adapters.add_argument("--adapter-path", default=None)
+    adapters.add_argument("--no-lora", action="store_true", help="Use base Qwen without loading an adapter")
     parser.add_argument("--asr-path", default=None)
     parser.add_argument("--no-asr", action="store_true", help="Use audio_text only (local debugging)")
     selection = parser.add_mutually_exclusive_group()
@@ -257,12 +259,15 @@ def main() -> None:
             )
         model_path = "Qwen/Qwen3.5-4B"
 
-    adapter_dir = adapter_path(args.adapter_path)
-    if not args.skip_adapter_check:
-        digest = verify_adapter(adapter_dir)
-        print(f"adapter sha256: {digest}")
+    adapter_dir = None
+    if args.no_lora:
+        print("adapter: disabled (base model)")
     else:
-        print(f"adapter: {adapter_dir} (SHA check skipped)")
+        adapter_dir = adapter_path(args.adapter_path)
+        if args.skip_adapter_check:
+            print(f"adapter: {adapter_dir} (SHA check skipped)")
+        else:
+            print(f"adapter sha256: {verify_adapter(adapter_dir)}")
 
     import torch
 
@@ -273,10 +278,10 @@ def main() -> None:
         str(model_path),
         device=device,
         dtype=dtype,
-        adapter_path=str(adapter_dir),
+        adapter_path=str(adapter_dir) if adapter_dir else None,
         verify_adapter=False,
     )
-    caller_view = AdapterView(backend, enabled=True)
+    caller_view = AdapterView(backend, enabled=not args.no_lora)
     cache = None if args.no_cache else PrefixCacheCaller(backend, caller_view)
     catalog = Catalog.load(data_root / split / f"{split}_tools_catalog.json")
     config = AgentConfig(
