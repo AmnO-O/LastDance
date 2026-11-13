@@ -12,6 +12,8 @@ Only the Search-First agent is implemented here: a discovery prompt,
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
+import random
 from collections import Counter
 import json
 import os
@@ -181,13 +183,43 @@ class GoldCaller(Caller):
         return action
 
 
-def prepare(transcripts_mode):
+def mixed_sample(sample, entry, rng):
+    """Sample each spoken turn independently and record its actual source."""
+    history = []
+    sources = {}
+    asr_history = entry.get("history") or []
+
+    def choose(key, asr, gold):
+        use_asr = rng.random() < 0.2
+        asr = (asr or "").strip()
+        sources[key] = "gipformer" if use_asr and asr else ("gold_fallback" if use_asr else "gold")
+        return asr if use_asr and asr else gold
+
+    current = sample.audio_text or sample.raw.get("text", "")
+    if sample.audio:
+        current = choose("current", entry.get("current"), current)
+    user_index = 0
+    for turn in sample.history:
+        updated = dict(turn)
+        if turn.get("role") == "user":
+            if turn.get("audio"):
+                asr = asr_history[user_index] if user_index < len(asr_history) else None
+                updated["text"] = choose(f"history:{user_index}", asr, turn.get("text") or turn.get("audio_text") or "")
+            user_index += 1
+        history.append(updated)
+    return replace(sample, raw={**sample.raw, "audio_text": current, "history": history}), sources
+
+
+def prepare(transcripts_mode, full_train=False, teacher=None):
     from transformers import AutoTokenizer
 
     from lifemate.train_unsloth import encode_example
 
     prompt_sha = configure_sft_prompt()
     root, val, split, by_id = inputs()
+    if full_train:
+        excluded = set(val) | set(split["dev"])
+        split = {**split, "train": sorted(by_id.keys() - excluded)}
     WORK.mkdir(parents=True, exist_ok=True)
     catalog = Catalog.load(catalog_path(root, "train"))
     transcripts = read_transcript_file(transcript_path())
@@ -202,34 +234,45 @@ def prepare(transcripts_mode):
                 reports.append(dict(id=sid, group=group, status="gold_replay_mismatch"))
                 counts[f"{group}:gold_replay_mismatch"] += 1
                 continue
+            rng = random.Random(f"{SEED}:{sid}")
+            config = replace(CONFIG, max_steps=rng.randint(13, 20)) if full_train and group == "train" else CONFIG
             variants = (
+                ("mixed",) if transcripts_mode == "mixed" and group == "train" else
                 ("gold", "gipformer")
                 if transcripts_mode == "both" and group == "train"
                 else (("gold" if transcripts_mode == "gold" else "gipformer"),)
             )
             for source in variants:
-                caller = GoldCaller(catalog, sample.gold_calls)
+                caller = GoldCaller(catalog, sample.gold_calls, config=config)
+                turn_sources = {}
                 result = None
+                replay_score = None
                 try:
-                    incoming = (
-                        prepared_sample(sample, transcripts.get(sid, {}))
-                        if source == "gipformer"
-                        else sample
-                    )
+                    if source == "mixed":
+                        incoming, turn_sources = mixed_sample(sample, transcripts.get(sid, {}), rng)
+                    else:
+                        incoming = (
+                            prepared_sample(sample, transcripts.get(sid, {}))
+                            if source == "gipformer"
+                            else sample
+                        )
                 except ValueError:
                     status = "missing_gipformer"
                 else:
-                    agent = LifeMateAgent(catalog, caller, config=CONFIG)
+                    agent = LifeMateAgent(catalog, caller, config=config)
                     try:
                         result = agent.run(incoming, env_factory(sid))
                         if discovery._E5_FAILED:
                             raise RuntimeError("Hybrid retriever did not load")
                         if not result.finished:
                             raise ReplayRejected("unfinished")
-                        if result.state_hash != gold_hash or not exact_calls(
-                            result.calls, gold_calls, catalog
-                        ):
-                            raise ReplayRejected("final_state_or_calls_mismatch")
+                        replay_score = score_prediction(
+                            result.calls, result.state_hash, sample.gold_calls, gold_hash, catalog
+                        )
+                        if replay_score.score != 1.0:
+                            raise ReplayRejected("score_below_1")
+                        if not exact_calls(result.calls, gold_calls, catalog):
+                            raise ReplayRejected("gold_calls_mismatch")
                         if any(encode_example(tokenizer, example, 4096) is None for example in caller.examples):
                             raise ReplayRejected("overlength")
                     except ReplayRejected as exc:
@@ -239,6 +282,33 @@ def prepare(transcripts_mode):
                         examples[group].extend(
                             dict(example.as_row(), source=source) for example in caller.examples
                         )
+                gold_status = status
+                if teacher is not None and group == "train" and status not in {"kept", "overlength", "missing_gipformer"}:
+                    gemini_caller = Caller(
+                        teacher, catalog, max_steps=config.max_steps, capture_prompts=True,
+                        discovery_prompt=SFT_SYSTEM_PROMPT, user_template=DISCOVERY_USER_TEMPLATE,
+                    )
+                    result = LifeMateAgent(catalog, gemini_caller, config=config).run(incoming, env_factory(sid))
+                    replay_score = score_prediction(result.calls, result.state_hash, sample.gold_calls, gold_hash, catalog)
+                    teacher_rows = [
+                        SFTExample("caller", sid, decision["step"] - 1, decision["messages"],
+                                   json.dumps(decision["action"], ensure_ascii=False))
+                        for decision in result.raw_outputs if decision["action"]["action"] in {"call", "ask", "finish"}
+                    ]
+                    clean = all(
+                        record.result.get("ok") is True and
+                        (record.tool != discovery.SEARCH_TOOL or record.result.get("tools"))
+                        for record in result.trace
+                    )
+                    if (result.finished and not result.error and not result.notes and clean
+                            and replay_score.score == 1.0 and writes(result.calls, catalog) == writes(gold_calls, catalog)
+                            and len(teacher_rows) == len(result.raw_outputs)
+                            and all(encode_example(tokenizer, row, 4096) is not None for row in teacher_rows)):
+                        status = "kept"
+                        examples[group].extend(dict(row.as_row(), source="gemini") for row in teacher_rows)
+                    else:
+                        status = "gemini_rejected"
+                    source = "gemini"
                 counts[f"{group}:{source}:{status}"] += 1
                 reports.append(
                     dict(
@@ -246,7 +316,11 @@ def prepare(transcripts_mode):
                         group=group,
                         source=source,
                         status=status,
+                        gold_status=gold_status,
                         actions=len(caller.examples),
+                        score=replay_score.score if replay_score is not None else None,
+                        turn_sources=turn_sources,
+                        max_steps=config.max_steps,
                         rejected_decision=caller.target if status != "kept" else None,
                         notes=result.notes if result else [],
                     )
@@ -277,6 +351,10 @@ def prepare(transcripts_mode):
         max_steps=CONFIG.max_steps,
         top_k=discovery.SEARCH_LIMIT,
         transcripts=transcripts_mode,
+        full_train=full_train,
+        required_replay_score=1.0,
+        gemini_model=teacher.model if teacher is not None else None,
+        train_max_steps=[13, 20] if full_train else [CONFIG.max_steps, CONFIG.max_steps],
         transcript_sha256=sha(transcript_path()),
         split=split,
         val_ids=val,
@@ -319,6 +397,8 @@ def train(args):
     manifest = read(WORK / "gold_replay_manifest.json")
     if manifest["prompt_sha256"] != configure_sft_prompt() or manifest["retriever_sha256"] != sha(discovery.__file__):
         raise ValueError("Prepared prompt or retriever differs from the current code")
+    if manifest.get("required_replay_score") != 1.0:
+        raise ValueError("Run prepare again to enforce the 1.0 replay score gate")
     by_group = {}
     for source, destination in (("train", "train"), ("dev", "validation")):
         path = WORK / f"{source}_examples.jsonl"
@@ -509,11 +589,14 @@ def evaluate(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("prepare", "train", "smoke-eval", "dev", "val"))
-    parser.add_argument("--transcripts", choices=("gold", "gipformer", "both"), default="both")
+    parser.add_argument("--transcripts", choices=("gold", "gipformer", "both", "mixed"), default="both")
+    parser.add_argument("--gemini-fallback", action="store_true")
+    parser.add_argument("--gemini-model", default="gemini-3.5-flash-lite")
+    parser.add_argument("--full-train", action="store_true", help="Prepare all eligible train IDs with a 13-20 step budget")
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--save-steps", type=int, default=20)
     parser.add_argument("--batch", type=int, default=8)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--run-tag", default="search_first")
     parser.add_argument("--init-adapter", type=Path)
     parser.add_argument("--adapter", type=Path, action="append", default=[])
@@ -521,7 +604,17 @@ def main():
     parser.add_argument("--compare-base", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        prepare(args.transcripts)
+        teacher = None
+        if args.gemini_fallback:
+            from pipeline.gemini_teacher import GeminiTeacher
+
+            teacher = GeminiTeacher(json.loads(os.environ.get("LIFEMATE_GEMINI_KEYS", "[]")), args.gemini_model)
+            if not teacher.complete(
+                [{"role": "system", "content": "Return one JSON object."},
+                 {"role": "user", "content": 'Return {"ready":true}.'}], None,
+            ):
+                raise RuntimeError("Gemini preflight returned no text")
+        prepare(args.transcripts, full_train=args.full_train, teacher=teacher)
     elif args.mode == "train":
         if not 0 < args.learning_rate < 1:
             parser.error("--learning-rate must be between 0 and 1")
