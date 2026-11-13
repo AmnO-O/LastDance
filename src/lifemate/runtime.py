@@ -44,6 +44,7 @@ class AgentConfig:
     max_notes: int = 8
     tool_discovery: bool = False
     max_searches: int = 1
+    verify_finish: bool = False
 
 
 # A successful identical call is normally a loop. A few write tools are
@@ -195,6 +196,7 @@ class LifeMateAgent:
         } if discovery else None)
         discovered: list[str] = []
         searches = 0
+        finish_checked = False
 
         for step in range(self.config.max_steps):
             visible_notes = notes[-self.config.max_notes :]
@@ -215,6 +217,17 @@ class LifeMateAgent:
                     notes=visible_notes, trace_count=len(trace),
                 )
             if action.action == "finish":
+                if self.config.verify_finish and not finish_checked and step + 1 < self.config.max_steps:
+                    finish_checked = True
+                    started_check = time.perf_counter()
+                    try:
+                        check = self.caller.check_finish(prepared, trace)
+                    except Exception as exc:
+                        check = {"missing": "", "error": f"{type(exc).__name__}: {exc}"}
+                    raw_outputs[-1]["finish_check"] = {**check, "seconds": time.perf_counter() - started_check}
+                    if check["missing"]:
+                        notes.append("Before finishing, recheck this possible unfinished request: " + check["missing"])
+                        continue
                 finished = True
                 break
             if action.action == "invalid":

@@ -159,6 +159,8 @@ def print_debug_trace(row: dict) -> None:
     for index, decision in enumerate(decisions):
         show(f"Caller step {decision['step']} raw output", decision["raw"])
         show("Parsed action", decision["action"])
+        if "finish_check" in decision:
+            show("Finish check", decision["finish_check"])
         start = decision["trace_count"]
         end = decisions[index + 1]["trace_count"] if index + 1 < len(decisions) else len(records)
         for record in records[start:end]:
@@ -181,6 +183,8 @@ def main() -> None:
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--ids", nargs="+", help="Run exactly these sample IDs in the given order")
+    parser.add_argument("--check-finish", action="store_true", help="Check the first finish before accepting it")
+    parser.add_argument("--asr-corrections", action="store_true", help="Add a short ASR interpretation rule")
     parser.add_argument("--debug-trace", type=Path, help="Print caller decisions and tool results and save a JSONL trace")
     parser.add_argument("--no-cache", action="store_true", help="Disable the request-local prefix cache")
     parser.add_argument("--skip-adapter-check", action="store_true")
@@ -277,7 +281,15 @@ def main() -> None:
         max_steps=12,
         tool_discovery=True,
         max_searches=4,
+        verify_finish=args.check_finish,
     )
+    discovery_prompt = None
+    if args.asr_corrections:
+        discovery_prompt = prompts.discovery_system(prompts.CALLER_SYSTEM) + (
+            "\nASR may omit punctuation. Follow clear corrections (e.g. à không). "
+            "If ambiguity changes a write, ask before acting."
+        )
+        print("effective caller prompt sha256:", hashlib.sha256(discovery_prompt.encode()).hexdigest())
     caller = Caller(
         cache or caller_view,
         catalog,
@@ -286,6 +298,7 @@ def main() -> None:
         max_steps=config.max_steps,
         collect_metrics=True,
         capture_prompts=bool(args.debug_trace),
+        discovery_prompt=discovery_prompt,
     )
     agent = LifeMateAgent(catalog, caller, config=config)
     print(f"load model: {int((time.perf_counter() - started) * 1000)} ms", flush=True)

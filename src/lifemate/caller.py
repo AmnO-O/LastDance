@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from .catalog import Catalog
 from .data import PreparedSample
 from .llm import ChatBackend, GenerationSettings
-from .prompts import caller_messages
+from .prompts import caller_messages, render_history, render_trace
 from .resolvers import ToolRecord
 from .text import extract_json_values, first_json_object, fold
 
@@ -199,6 +199,30 @@ class Caller:
         self.capture_prompts = capture_prompts
         self.collect_metrics = collect_metrics
         self.discovery_prompt = discovery_prompt
+
+    def check_finish(self, prepared: PreparedSample, trace: Iterable[ToolRecord]) -> dict[str, Any]:
+        messages = [
+            {"role": "system", "content": (
+                'Check if any explicit, applicable request still needs a tool action. '
+                'Use history and tool results. Ignore cancelled or unmet conditional tasks. '
+                'Do not propose undoing or repeating writes. '
+                'Reply {"missing":""} if done or unsure, otherwise name the missing task briefly in "missing".'
+            )},
+            {"role": "user", "content": (
+                f"Request:\n{prepared.request_text}\n\n"
+                f"History:\n{render_history(prepared, max_chars=4000)}\n\n"
+                f"Tool results:\n{render_trace([record for record in trace if record.tool != 'sys.search_tools'])}"
+            )},
+        ]
+        raw = self.backend.complete(
+            messages, GenerationSettings(max_new_tokens=96, temperature=0.0, seed=self.seed)
+        )
+        try:
+            verdict = json.loads(raw)
+        except (TypeError, ValueError):
+            verdict = {}
+        missing = verdict.get("missing") if isinstance(verdict, dict) else None
+        return {"raw": raw, "missing": missing.strip()[:250] if isinstance(missing, str) else ""}
 
     def next_action(
         self,
