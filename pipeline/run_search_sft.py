@@ -235,7 +235,11 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
                 counts[f"{group}:gold_replay_mismatch"] += 1
                 continue
             rng = random.Random(f"{SEED}:{sid}")
-            config = replace(CONFIG, max_steps=rng.randint(13, 20)) if full_train and group == "train" else CONFIG
+            config = (
+                replace(CONFIG, max_steps=rng.randint(13, 20), max_searches=6)
+                if full_train and group == "train"
+                else CONFIG
+            )
             variants = (
                 ("mixed",) if transcripts_mode == "mixed" and group == "train" else
                 ("gold", "gipformer")
@@ -354,6 +358,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
         full_train=full_train,
         required_replay_score=1.0,
         gemini_model=teacher.model if teacher is not None else None,
+        train_max_searches=6 if full_train else CONFIG.max_searches,
         train_max_steps=[13, 20] if full_train else [CONFIG.max_steps, CONFIG.max_steps],
         transcript_sha256=sha(transcript_path()),
         split=split,
