@@ -34,6 +34,8 @@ from pipeline.runtime_utils import (
 )
 
 from lifemate import discovery
+from lifemate.prompts import DISCOVERY_USER_TEMPLATE, SFT_SYSTEM_PROMPT
+import hashlib
 from lifemate.caller import Caller
 from lifemate.catalog import Catalog
 from lifemate.data import catalog_path, read_transcript_file
@@ -93,6 +95,12 @@ class ReplayRejected(Exception):
     """The available observation cannot reproduce this gold trajectory."""
 
 
+def configure_sft_prompt():
+    configure()
+    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE], ensure_ascii=False)
+    return hashlib.sha256(pair.encode("utf-8")).hexdigest()
+
+
 class GoldCaller(Caller):
     """Scripted caller that emits the gold action and builds SFT rows from the replay."""
 
@@ -103,6 +111,8 @@ class GoldCaller(Caller):
             max_steps=config.max_steps,
             max_new_tokens=CALLER_TOKENS,
             capture_prompts=True,
+            discovery_prompt=SFT_SYSTEM_PROMPT,
+            user_template=DISCOVERY_USER_TEMPLATE,
         )
         self.config = config
         self.gold = gold
@@ -176,7 +186,7 @@ def prepare(transcripts_mode):
 
     from lifemate.train_unsloth import encode_example
 
-    prompt_sha = configure()
+    prompt_sha = configure_sft_prompt()
     root, val, split, by_id = inputs()
     WORK.mkdir(parents=True, exist_ok=True)
     catalog = Catalog.load(catalog_path(root, "train"))
@@ -307,7 +317,7 @@ def train(args):
         return
 
     manifest = read(WORK / "gold_replay_manifest.json")
-    if manifest["prompt_sha256"] != configure() or manifest["retriever_sha256"] != sha(discovery.__file__):
+    if manifest["prompt_sha256"] != configure_sft_prompt() or manifest["retriever_sha256"] != sha(discovery.__file__):
         raise ValueError("Prepared prompt or retriever differs from the current code")
     by_group = {}
     for source, destination in (("train", "train"), ("dev", "validation")):
@@ -395,6 +405,8 @@ def eval_worker(rank, world, mode, ids, arms, cache_enabled):
                     max_new_tokens=CALLER_TOKENS,
                     max_steps=CONFIG.max_steps,
                     collect_metrics=True,
+                    discovery_prompt=SFT_SYSTEM_PROMPT,
+                    user_template=DISCOVERY_USER_TEMPLATE,
                 )
                 agent = LifeMateAgent(catalog, caller, config=CONFIG)
                 torch.cuda.synchronize(rank)
@@ -485,7 +497,7 @@ def evaluate(args):
             ids=ids,
             cache=not args.no_cache,
             metrics=metrics,
-            prompt_sha256=configure(),
+            prompt_sha256=configure_sft_prompt(),
             retriever_sha256=sha(discovery.__file__),
             traces_sha256={name: sha(WORK / f"{args.mode}_{name}_traces.jsonl") for name, _ in arms},
             live_asr=False,
