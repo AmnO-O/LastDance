@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -147,6 +148,26 @@ def select_samples(jsonl_path: Path, ids: list[str] | None, limit: int | None) -
     return [matched[sid] for sid in ids]
 
 
+def print_debug_trace(row: dict) -> None:
+    def show(label, value):
+        print(f"{label}: {json.dumps(value, ensure_ascii=False, default=str)}", flush=True)
+
+    print(f"\n=== {row['id']} ===", flush=True)
+    show("ASR", row["transcript"])
+    decisions = row.get("raw_outputs", [])
+    records = row.get("trace", [])
+    for index, decision in enumerate(decisions):
+        show(f"Caller step {decision['step']} raw output", decision["raw"])
+        show("Parsed action", decision["action"])
+        start = decision["trace_count"]
+        end = decisions[index + 1]["trace_count"] if index + 1 < len(decisions) else len(records)
+        for record in records[start:end]:
+            show("Tool call", {"name": record["tool"], "arguments": record["arguments"]})
+            show("Tool response", record["result"])
+    show("Runtime notes", row.get("notes", []))
+    show("Outcome", {"finished": row.get("finished", False), "error": row.get("error")})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LifeMate Search-First submission predictor")
     parser.add_argument("pos_data_dir", nargs="?", default=None, help="Input dataset directory")
@@ -160,6 +181,7 @@ def main() -> None:
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--ids", nargs="+", help="Run exactly these sample IDs in the given order")
+    parser.add_argument("--debug-trace", type=Path, help="Print caller decisions and tool results and save a JSONL trace")
     parser.add_argument("--no-cache", action="store_true", help="Disable the request-local prefix cache")
     parser.add_argument("--skip-adapter-check", action="store_true")
     parser.add_argument("--allow-download", action="store_true", help="Allow using the HF model id")
@@ -172,6 +194,10 @@ def main() -> None:
     output_file = Path(
         args.output or args.pos_output_file or os.environ.get("OUTPUT_FILE", "/result/submission.jsonl")
     ).resolve()
+    if args.debug_trace:
+        if args.debug_trace.resolve() == output_file:
+            parser.error("--debug-trace and --output must be different files")
+        args.debug_trace.parent.mkdir(parents=True, exist_ok=True)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     print(f"data root: {data_root}")
     print(f"split: {split} ({len(samples)} selected samples)")
@@ -259,6 +285,7 @@ def main() -> None:
         max_history_chars=config.max_history_chars,
         max_steps=config.max_steps,
         collect_metrics=True,
+        capture_prompts=bool(args.debug_trace),
     )
     agent = LifeMateAgent(catalog, caller, config=config)
     print(f"load model: {int((time.perf_counter() - started) * 1000)} ms", flush=True)
@@ -266,7 +293,9 @@ def main() -> None:
     predict_started = time.perf_counter()
     cache_hits = cache_misses = 0
 
-    with output_file.open("w", encoding="utf-8") as out:
+    with ExitStack() as stack:
+        out = stack.enter_context(output_file.open("w", encoding="utf-8"))
+        debug = stack.enter_context(args.debug_trace.open("w", encoding="utf-8")) if args.debug_trace else None
         for index, item in enumerate(samples, 1):
             sid = item["id"]
             sample_started = time.perf_counter()
@@ -302,10 +331,13 @@ def main() -> None:
             if cache is not None:
                 cache.finish_request()
             started_sample = time.perf_counter()
+            result = None
+            run_error = None
             try:
-                agent.run(sample, env)
+                result = agent.run(sample, env)
             except Exception as exc:  # keep one bad sample from stopping the submission
-                print(f"[WARN] {sid}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                run_error = f"{type(exc).__name__}: {exc}"
+                print(f"[WARN] {sid}: {run_error}", file=sys.stderr, flush=True)
             elapsed = time.perf_counter() - started_sample
             if cache is not None:
                 stats = cache.finish_request()
@@ -324,6 +356,14 @@ def main() -> None:
             }
             out.write(json.dumps(submission, ensure_ascii=False) + "\n")
             out.flush()
+            if debug is not None:
+                row = result.to_dict() if result is not None else {
+                    "id": sid, "transcript": current_text, "error": run_error,
+                    "calls": tool_calls, "state_hash": state_hash,
+                }
+                debug.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+                debug.flush()
+                print_debug_trace(row)
             print(
                 f"[{index}/{len(samples)}] {sid}: {len(tool_calls)} calls, "
                 f"{int(elapsed * 1000)} ms, hash={state_hash[:12]}",
@@ -333,7 +373,7 @@ def main() -> None:
     total = time.perf_counter() - predict_started
     print(
         f"predict: {len(samples)} samples, {int(total * 1000)} ms, "
-        f"{total / max(1, len(lines)) * 1000:.1f} ms/sample",
+        f"{total / max(1, len(samples)) * 1000:.1f} ms/sample",
         flush=True,
     )
     if cache is not None and cache_hits + cache_misses:
