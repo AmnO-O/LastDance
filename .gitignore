@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+work/
+*.tar.gz
+*.zip
+outputs/
+.DS_Store
+
+# Local competition inputs and model weights
+/data/train_gipformer.json
+/models/*
+!/models/README.md
+.env
+.env.*

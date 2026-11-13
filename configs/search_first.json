@@ -1,0 +1,49 @@
+{
+  "name": "search_first",
+  "agent": {
+    "tool_discovery": true,
+    "max_searches": 4,
+    "max_steps": 12,
+    "retrieval_top_k": 6,
+    "caller_max_new_tokens": 220,
+    "prefix_cache": true
+  },
+  "model": {
+    "base": "Qwen/Qwen3.5-4B",
+    "adapter": "search_first_a100_checkpoint-100",
+    "adapter_sha256": "927186df0ff6c7bb9deca0f1a9f960d14ff6f246f7c101e16069d7e974c9f8c8"
+  },
+  "prompts": {
+    "caller_prompt_b_sha256": "76eb6f20648c71b4d243932a9a18628b998e6373a6f2ffbb7d57eb468f3810b2",
+    "search_first_system_sha256": "5268fcf5470fdfb2adb3eabb0eeb857cfc060f4413b81f8d3d4974bd4ec111ed"
+  },
+  "retriever": {
+    "model": "intfloat/multilingual-e5-small",
+    "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+    "source_sha256": "05b8ba54da9b85d3f95853c7ce7fd3e3f5ae15503ae1e1754b086c37529a784b"
+  },
+  "training": {
+    "seed": 42,
+    "run_tag": "search_first",
+    "initialization": "fresh_lora",
+    "lora_rank": 16,
+    "max_length": 4096,
+    "steps": 100,
+    "save_steps": 20,
+    "global_batch": 8,
+    "learning_rate": 0.0001,
+    "max_searches": 4,
+    "max_steps": 12
+  },
+  "data": {
+    "train_ids": 80,
+    "dev_ids": 20,
+    "validation_ids": 200,
+    "transcript_sha256": "81b2bb40dc5a3be532db29e8d3c14e194294d518ab0bc19e39e3605106cecfe6"
+  },
+  "provenance": {
+    "adapter_training_prompt_sha256": "fd0b5681953ed7e1b8472e3f349309cf37e9824ecf0a2c41a609a748ec2cd8fc",
+    "inference_prompt": "Prompt B + discovery_system (current final prompt)",
+    "note": "Checkpoint-100 is the selected A100 Search-First SFT adapter. It was trained with the previous discovery prompt and is evaluated with the final 5268 prompt after the prompt replay audit."
+  }
+}

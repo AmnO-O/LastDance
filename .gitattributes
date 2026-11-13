@@ -1,0 +1,4 @@
+# These files are checked byte-for-byte at runtime or by check_hashes.py.
+src/lifemate/discovery.py -text
+data/split_ids.json -text
+data/validation_200_ids.txt -text

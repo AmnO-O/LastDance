@@ -1,0 +1,11 @@
+transformers>=4.45.0
+peft>=0.13.0
+accelerate>=0.34.0
+sherpa-onnx>=1.10.0
+soundfile>=0.12.1
+scipy>=1.11.0
+numpy>=1.24.0
+safetensors>=0.4.2
+huggingface_hub>=0.20.0
+sentence-transformers>=3.0.0
+jupyterlab>=4.0.0

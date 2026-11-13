@@ -1,0 +1,8 @@
+# Inference + training environment.
+# The Docker image uses submission/requirements.txt only.
+-r submission/requirements.txt
+
+# Training / replay
+torch>=2.6
+datasets>=2.20
+unsloth>=2026.11.4
