@@ -158,6 +158,8 @@ def print_debug_trace(row: dict) -> None:
     records = row.get("trace", [])
     for index, decision in enumerate(decisions):
         show(f"Caller step {decision['step']} raw output", decision["raw"])
+        if "preopened_tools" in decision:
+            show("Preopened tools", decision["preopened_tools"])
         show("Parsed action", decision["action"])
         if "finish_check" in decision:
             show("Finish check", decision["finish_check"])
@@ -190,6 +192,7 @@ def main() -> None:
     parser.add_argument("--user-template-file", type=Path)
     parser.add_argument("--caller-checklist", action="store_true", help="Try concise write and finish rules")
     parser.add_argument("--asr-corrections", action="store_true", help="Add a short ASR interpretation rule")
+    parser.add_argument("--preopen-tools", type=int, choices=range(0, 21), metavar="0..20", default=0)
     parser.add_argument("--debug-trace", type=Path, help="Print caller decisions and tool results and save a JSONL trace")
     parser.add_argument("--no-cache", action="store_true", help="Disable the request-local prefix cache")
     parser.add_argument("--skip-adapter-check", action="store_true")
@@ -290,6 +293,7 @@ def main() -> None:
         tool_discovery=True,
         max_searches=4,
         verify_finish=args.check_finish,
+        preopen_tools=args.preopen_tools,
     )
     discovery_prompt = None
     if args.asr_corrections:

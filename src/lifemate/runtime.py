@@ -45,6 +45,7 @@ class AgentConfig:
     tool_discovery: bool = False
     max_searches: int = 1
     verify_finish: bool = False
+    preopen_tools: int = 0
 
 
 # A successful identical call is normally a loop. A few write tools are
@@ -195,6 +196,14 @@ class LifeMateAgent:
             if not schema["name"].startswith("sys.")
         } if discovery else None)
         discovered: list[str] = []
+        if opened is not None and self.config.preopen_tools:
+            discovered = [
+                tool.name for tool in search_tools(
+                    self.catalog, sample.installed_apps, prepared.request_text,
+                    opened=opened, limit=self.config.preopen_tools,
+                )
+            ]
+            opened.update(discovered)
         searches = 0
         finish_checked = False
 
@@ -209,6 +218,8 @@ class LifeMateAgent:
                 **({"discovery": True, "discovered_tools": tuple(discovered)} if discovery else {}),
             )
             raw_outputs.append({"step": step + 1, "action": action.as_dict(), "raw": action.raw_text})
+            if step == 0 and self.config.preopen_tools:
+                raw_outputs[-1]["preopened_tools"] = list(discovered)
             if action.metrics:
                 raw_outputs[-1]["metrics"] = action.metrics
             if action.messages is not None:
