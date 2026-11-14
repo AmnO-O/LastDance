@@ -96,7 +96,7 @@ class ReplayRejected(Exception):
     """The available observation cannot reproduce this gold trajectory."""
 
 
-def configure_sft_prompt(preopen_tools: int | None = None):
+def configure_sft_prompt(preopen_tools: int | None = None, *, legacy_windows_runtime=False):
     """Hash the exact inference prompt plus every input that changes a row.
 
     Gold replay rows must be rendered with the same system/user template that
@@ -110,7 +110,11 @@ def configure_sft_prompt(preopen_tools: int | None = None):
             "caller_messages:discovery:default-user-template",
             CONFIG.preopen_tools if preopen_tools is None else preopen_tools,
             sha(REPO / "src" / "lifemate" / "catalog.py"),
-            sha(REPO / "src" / "lifemate" / "runtime.py"),
+            hashlib.sha256(
+                (REPO / "src" / "lifemate" / "runtime.py").read_bytes()
+                .replace(b"\r\n", b"\n")
+                .replace(b"\n", b"\r\n" if legacy_windows_runtime else b"\n")
+            ).hexdigest(),
             sha(REPO / "src" / "lifemate" / "caller.py"),
             sha(REPO / "src" / "lifemate" / "prompts.py"),
         ],
@@ -246,16 +250,22 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
         path = verified_dataset / "teacher_ds.jsonl"
         expected = dict(top_k=CONFIG.top_k, preopen_tools=CONFIG.preopen_tools,
                         max_searches=CONFIG.max_searches, max_steps=CONFIG.max_steps, seed=SEED)
-        if (manifest["schema"] != "lifemate.teacher_ds.v1"
-                or manifest["required_replay_score"] != 1.0
-                or manifest["max_length"] != 6144
-                or manifest["config"] != expected
-                or manifest["recipe_sha256"] != prompt_sha
-                or manifest["retriever_sha256"] != sha(discovery.__file__)
-                or manifest["catalog_sha256"] != sha(catalog_path(root, "train"))
-                or manifest["transcript_sha256"] != sha(transcript_path())
-                or manifest["files"]["teacher_ds"]["sha256"] != sha(path)):
-            raise ValueError("Verified dataset does not match the current replay configuration")
+        checks = {
+            "schema": manifest["schema"] == "lifemate.teacher_ds.v1",
+            "required_replay_score": manifest["required_replay_score"] == 1.0,
+            "max_length": manifest["max_length"] == 6144,
+            "config": manifest["config"] == expected,
+            "recipe_sha256": manifest["recipe_sha256"] in {
+                prompt_sha, configure_sft_prompt(legacy_windows_runtime=True)
+            },
+            "retriever_sha256": manifest["retriever_sha256"] == sha(discovery.__file__),
+            "catalog_sha256": manifest["catalog_sha256"] == sha(catalog_path(root, "train")),
+            "transcript_sha256": manifest["transcript_sha256"] == sha(transcript_path()),
+            "teacher_ds.sha256": manifest["files"]["teacher_ds"]["sha256"] == sha(path),
+        }
+        mismatches = [name for name, matches in checks.items() if not matches]
+        if mismatches:
+            raise ValueError("Verified dataset mismatch: " + ", ".join(mismatches))
         training = list(rows(path))
         ids = {row["sample_id"] for row in training}
         if not training or len(training) != manifest["rows"] or ids - set(split["train"]):
