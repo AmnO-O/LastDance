@@ -332,6 +332,7 @@ def train_examples(args, examples, summary, local_rank=0):
         if not kept:
             raise ValueError(f"All {name} examples exceed --max-length")
         summary[name]["max_tokens"] = max(len(row["input_ids"]) for row in kept)
+        retained_count = len(kept)
         if args.smoke_longest:
             longest = max(kept, key=lambda row: len(row["input_ids"]))
             kept = [longest] * (
@@ -339,7 +340,7 @@ def train_examples(args, examples, summary, local_rank=0):
                 if name == "train" else 2
             )
         datasets[name] = Dataset.from_list(kept)
-        summary[name].update(kept=len(kept), dropped_overlength=len(rows) - len(kept))
+        summary[name].update(kept=retained_count, dropped_overlength=len(rows) - retained_count)
     if tracked:
         summary["tracked_recovery"] = {"eligible": sorted(available_tracked),
                                        "dropped": sorted(set(tracked.values()) - available_tracked)}
@@ -361,7 +362,7 @@ def train_examples(args, examples, summary, local_rank=0):
         "optim": "adamw_8bit",
         "fp16": not bf16,
         "bf16": bf16,
-        "logging_steps": 5,
+        "logging_steps": 1 if args.smoke_longest else 5,
         "eval_strategy": "steps",
         "eval_steps": args.eval_steps if args.eval_steps is not None else args.save_steps,
         "save_steps": args.save_steps,
@@ -416,7 +417,17 @@ def train_examples(args, examples, summary, local_rank=0):
         data_collator=collator, callbacks=callbacks,
         args=TrainingArguments(**training_kwargs),
     )
+    if args.smoke_longest:
+        torch.cuda.reset_peak_memory_stats(local_rank)
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    if args.smoke_longest:
+        stats = {
+            "peak_allocated_mib": torch.cuda.max_memory_allocated(local_rank) / 2**20,
+            "peak_reserved_mib": torch.cuda.max_memory_reserved(local_rank) / 2**20,
+            "grad_norm": [str(log["grad_norm"]) for log in trainer.state.log_history if "grad_norm" in log],
+        }
+        (args.output / f"smoke_rank{local_rank}.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        print(f"GPU {local_rank} smoke: {stats}", flush=True)
     if local_rank == 0:
         adapter_dir = args.output / "adapter"
         model.save_pretrained(str(adapter_dir))
