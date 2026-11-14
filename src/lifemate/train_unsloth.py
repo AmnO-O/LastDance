@@ -131,6 +131,7 @@ def parser():
     p.add_argument("--model", default="Qwen/Qwen3.5-4B")
     p.add_argument("--revision", default="main")
     p.add_argument("--load-in-4bit", action="store_true", help="Train LoRA on a 4-bit base model")
+    p.add_argument("--smoke-longest", action="store_true", help="Stress test with the longest encoded rows")
     p.add_argument("--max-length", type=int, default=3500)
     p.add_argument("--top-k", type=int, default=4)
     p.add_argument("--caller-max-steps", type=int, default=12)
@@ -242,6 +243,7 @@ def train_examples(args, examples, summary, local_rank=0):
     manifest = args.output / "manifest.json"
     # Import Unsloth before Transformers/PEFT so its training patches take effect.
     from unsloth import FastLanguageModel
+    import os
     import torch
     from datasets import Dataset
     from transformers import Trainer, TrainerCallback, TrainingArguments
@@ -329,6 +331,13 @@ def train_examples(args, examples, summary, local_rank=0):
             kept.append(encoded)
         if not kept:
             raise ValueError(f"All {name} examples exceed --max-length")
+        summary[name]["max_tokens"] = max(len(row["input_ids"]) for row in kept)
+        if args.smoke_longest:
+            longest = max(kept, key=lambda row: len(row["input_ids"]))
+            kept = [longest] * (
+                args.max_train_steps * args.gradient_accumulation * int(os.environ.get("WORLD_SIZE", "1"))
+                if name == "train" else 2
+            )
         datasets[name] = Dataset.from_list(kept)
         summary[name].update(kept=len(kept), dropped_overlength=len(rows) - len(kept))
     if tracked:

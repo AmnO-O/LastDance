@@ -232,7 +232,7 @@ def mixed_sample(sample, entry, rng):
     return replace(sample, raw={**sample.raw, "audio_text": current, "history": history}), sources
 
 
-def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=None):
+def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=None, max_length=6144):
     from transformers import AutoTokenizer
 
     from lifemate.train_unsloth import encode_example
@@ -296,9 +296,15 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
                     or score_prediction(result.calls, result.state_hash, by_id[sid].gold_calls, gold_hash, catalog).score != 1.0):
                 raise ValueError(f"Verified replay diverged while rendering {sid}")
             rendered = [dict(row, messages=messages) for row, messages in zip(group, backend.calls)]
-            if any(encode_example(tokenizer, SFTExample(**{
+            lengths = [len(encode_example(tokenizer, SFTExample(**{
                 key: row[key] for key in ("task", "sample_id", "step", "messages", "target")
-            }), 6144) is None for row in rendered):
+            }), sys.maxsize)["input_ids"]) for row in rendered]
+            longest = max(lengths)
+            for limit in sorted({4096, 5000, max_length}):
+                status = "kept" if longest <= limit else "dropped"
+                counts[f"tokens:{limit}:{status}:trajectories"] += 1
+                counts[f"tokens:{limit}:{status}:rows"] += len(rendered)
+            if longest > max_length:
                 counts["verified_dataset:overlength"] += 1
                 continue
             examples["train"].extend(rendered)
@@ -352,7 +358,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
                             raise ReplayRejected("score_below_1")
                         if not exact_calls(result.calls, gold_calls, catalog):
                             raise ReplayRejected("gold_calls_mismatch")
-                        if any(encode_example(tokenizer, example, 6144) is None for example in caller.examples):
+                        if any(encode_example(tokenizer, example, max_length) is None for example in caller.examples):
                             raise ReplayRejected("overlength")
                     except ReplayRejected as exc:
                         status = str(exc)
@@ -382,7 +388,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
                     if (result.finished and not result.error and not result.notes and clean
                             and replay_score.score == 1.0 and writes(result.calls, catalog) == writes(gold_calls, catalog)
                             and len(teacher_rows) == len(result.raw_outputs)
-                            and all(encode_example(tokenizer, row, 6144) is not None for row in teacher_rows)):
+                            and all(encode_example(tokenizer, row, max_length) is not None for row in teacher_rows)):
                         status = "kept"
                         examples[group].extend(dict(row.as_row(), source="gemini") for row in teacher_rows)
                     else:
@@ -426,7 +432,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
             SFT_SYSTEM_PROMPT.encode("utf-8")
         ).hexdigest(),
         prompt_template="short Search-First system and merged tool schema template",
-        max_length=6144,
+        max_length=max_length,
         model=MODEL,
         e5_model=discovery.E5_MODEL_ID,
         e5_revision=discovery.E5_REVISION,
@@ -512,7 +518,8 @@ def train(args):
             "--model",
             MODEL,
             "--max-length",
-            "6144",
+            str(manifest["max_length"]),
+            *(["--smoke-longest"] if args.smoke_longest else []),
             "--rank",
             "16",
             "--learning-rate",
@@ -688,6 +695,8 @@ def main():
     parser.add_argument("--gemini-model", default="gemini-3.5-flash-lite")
     parser.add_argument("--full-train", action="store_true", help="Prepare all eligible train IDs with a 13-20 step budget")
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--max-length", type=int, choices=(4096, 5000, 6144), default=6144)
+    parser.add_argument("--smoke-longest", action="store_true")
     parser.add_argument("--save-steps", type=int, default=20)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -711,7 +720,7 @@ def main():
                  {"role": "user", "content": 'Return {"ready":true}.'}], None,
             ):
                 raise RuntimeError("Gemini preflight returned no text")
-        prepare(args.transcripts, full_train=args.full_train, teacher=teacher, verified_dataset=args.verified_dataset)
+        prepare(args.transcripts, full_train=args.full_train, teacher=teacher, verified_dataset=args.verified_dataset, max_length=args.max_length)
     elif args.mode == "train":
         if not 0 < args.learning_rate < 1:
             parser.error("--learning-rate must be between 0 and 1")
