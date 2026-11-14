@@ -41,6 +41,7 @@ from lifemate.caller import Caller
 from lifemate.catalog import Catalog
 from lifemate.data import catalog_path, read_transcript_file
 from lifemate.llm import ScriptedBackend
+from lifemate.prompts import SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE
 from lifemate.runtime import AgentConfig, LifeMateAgent, make_tool_env
 from lifemate.scoring import calls_match, replay_gold, score_prediction
 from lifemate.sft import SFTExample, caller_target_derivable
@@ -96,7 +97,7 @@ class ReplayRejected(Exception):
     """The available observation cannot reproduce this gold trajectory."""
 
 
-def configure_sft_prompt(preopen_tools: int | None = None, *, legacy_windows_runtime=False):
+def configure_sft_prompt(preopen_tools: int | None = None, *, legacy_windows_runtime=False, original_format=False):
     """Hash the exact inference prompt plus every input that changes a row.
 
     Gold replay rows must be rendered with the same system/user template that
@@ -106,8 +107,8 @@ def configure_sft_prompt(preopen_tools: int | None = None, *, legacy_windows_run
     configure()
     pair = json.dumps(
         [
-            prompts.discovery_system(prompts.CALLER_SYSTEM),
-            "caller_messages:discovery:default-user-template",
+            prompts.discovery_system(prompts.CALLER_SYSTEM) if original_format else SFT_SYSTEM_PROMPT,
+            "caller_messages:discovery:default-user-template" if original_format else DISCOVERY_USER_TEMPLATE,
             CONFIG.preopen_tools if preopen_tools is None else preopen_tools,
             sha(REPO / "src" / "lifemate" / "catalog.py"),
             hashlib.sha256(
@@ -134,6 +135,8 @@ class GoldCaller(Caller):
             max_steps=config.max_steps,
             max_new_tokens=CALLER_TOKENS,
             capture_prompts=True,
+            discovery_prompt=SFT_SYSTEM_PROMPT,
+            user_template=DISCOVERY_USER_TEMPLATE,
         )
         self.config = config
         self.gold = gold
@@ -256,7 +259,8 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
             "max_length": manifest["max_length"] == 6144,
             "config": manifest["config"] == expected,
             "recipe_sha256": manifest["recipe_sha256"] in {
-                prompt_sha, configure_sft_prompt(legacy_windows_runtime=True)
+                configure_sft_prompt(original_format=True),
+                configure_sft_prompt(original_format=True, legacy_windows_runtime=True)
             },
             "retriever_sha256": manifest["retriever_sha256"] == sha(discovery.__file__),
             "catalog_sha256": manifest["catalog_sha256"] == sha(catalog_path(root, "train")),
@@ -270,8 +274,35 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
         ids = {row["sample_id"] for row in training}
         if not training or len(training) != manifest["rows"] or ids - set(split["train"]):
             raise ValueError("Verified dataset has invalid rows or includes ineligible IDs")
-        examples["train"] = training
-        counts["verified_dataset:rows"] = len(training)
+        grouped = {}
+        for row in training:
+            grouped.setdefault(row["sample_id"], []).append(row)
+        for sid, group in grouped.items():
+            group.sort(key=lambda row: row["step"])
+            sample = by_id[sid]
+            source = group[0]["source"]
+            if source == "mixed":
+                sample, _ = mixed_sample(sample, transcripts.get(sid, {}), random.Random(f"{SEED}:{sid}"))
+            elif source != "gold":
+                raise ValueError(f"Unsupported verified transcript source: {source}")
+            backend = ScriptedBackend([row["target"] for row in group])
+            caller = Caller(backend, catalog, max_steps=CONFIG.max_steps,
+                            discovery_prompt=SFT_SYSTEM_PROMPT, user_template=DISCOVERY_USER_TEMPLATE)
+            result = LifeMateAgent(catalog, caller, config=CONFIG).run(sample, env_factory(sid))
+            _, gold_calls, gold_hash = replay_gold(by_id[sid], env_factory)
+            if (discovery._E5_FAILED or result.error or not result.finished or backend.responses
+                    or len(backend.calls) != len(group) or result.state_hash != gold_hash
+                    or not exact_calls(result.calls, gold_calls, catalog)
+                    or score_prediction(result.calls, result.state_hash, by_id[sid].gold_calls, gold_hash, catalog).score != 1.0):
+                raise ValueError(f"Verified replay diverged while rendering {sid}")
+            rendered = [dict(row, messages=messages) for row, messages in zip(group, backend.calls)]
+            if any(encode_example(tokenizer, SFTExample(**{
+                key: row[key] for key in ("task", "sample_id", "step", "messages", "target")
+            }), 6144) is None for row in rendered):
+                counts["verified_dataset:overlength"] += 1
+                continue
+            examples["train"].extend(rendered)
+        counts["verified_dataset:rows"] = len(examples["train"])
     for group, ids in split.items():
         if group == "train" and verified_dataset is not None:
             continue
@@ -334,6 +365,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
                 if teacher is not None and group == "train" and status not in {"kept", "overlength", "missing_gipformer"}:
                     gemini_caller = Caller(
                         teacher, catalog, max_steps=config.max_steps, capture_prompts=True,
+                        discovery_prompt=SFT_SYSTEM_PROMPT, user_template=DISCOVERY_USER_TEMPLATE,
                     )
                     result = LifeMateAgent(catalog, gemini_caller, config=config).run(incoming, env_factory(sid))
                     replay_score = score_prediction(result.calls, result.state_hash, sample.gold_calls, gold_hash, catalog)
@@ -391,9 +423,9 @@ def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=N
     manifest = dict(
         prompt_sha256=prompt_sha,
         inference_prompt_sha256=hashlib.sha256(
-            prompts.discovery_system(prompts.CALLER_SYSTEM).encode("utf-8")
+            SFT_SYSTEM_PROMPT.encode("utf-8")
         ).hexdigest(),
-        prompt_template="caller_messages(discovery=True) default user template",
+        prompt_template="short Search-First system and merged tool schema template",
         max_length=6144,
         model=MODEL,
         e5_model=discovery.E5_MODEL_ID,
@@ -452,7 +484,7 @@ def train(args):
     if manifest["prompt_sha256"] != configure_sft_prompt() or manifest["retriever_sha256"] != sha(discovery.__file__):
         raise ValueError("Prepared prompt or retriever differs from the current code")
     if manifest.get("inference_prompt_sha256") != hashlib.sha256(
-        prompts.discovery_system(prompts.CALLER_SYSTEM).encode("utf-8")
+        SFT_SYSTEM_PROMPT.encode("utf-8")
     ).hexdigest():
         raise ValueError("Prepared rows were not rendered with the final inference prompt")
     if manifest.get("required_replay_score") != 1.0:
@@ -545,6 +577,8 @@ def eval_worker(rank, world, mode, ids, arms, cache_enabled):
                     max_new_tokens=CALLER_TOKENS,
                     max_steps=CONFIG.max_steps,
                     collect_metrics=True,
+                    discovery_prompt=SFT_SYSTEM_PROMPT,
+                    user_template=DISCOVERY_USER_TEMPLATE,
                 )
                 agent = LifeMateAgent(catalog, caller, config=CONFIG)
                 torch.cuda.synchronize(rank)
