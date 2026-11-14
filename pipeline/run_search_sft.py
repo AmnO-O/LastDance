@@ -726,7 +726,12 @@ def main():
             parser.error("--learning-rate must be between 0 and 1")
         if min(args.steps, args.batch, args.save_steps) < 1 or args.steps % args.save_steps:
             parser.error("Use positive steps, batch, and save interval. Save interval must divide steps.")
-        train(args)
+        if os.environ.get("LOCAL_RANK") is not None:
+            from torch.distributed.elastic.multiprocessing.errors import record
+
+            record(train)(args)
+        else:
+            train(args)
     else:
         evaluate(args)
 
