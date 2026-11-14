@@ -12,12 +12,13 @@ Only the Search-First agent is implemented here: a discovery prompt,
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
-import random
 from collections import Counter
+from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import sys
 import time
 
@@ -35,9 +36,7 @@ from pipeline.runtime_utils import (
     prepared_sample,
 )
 
-from lifemate import discovery
-from lifemate.prompts import DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC, SFT_SYSTEM_PROMPT
-import hashlib
+from lifemate import discovery, prompts
 from lifemate.caller import Caller
 from lifemate.catalog import Catalog
 from lifemate.data import catalog_path, read_transcript_file
@@ -97,9 +96,27 @@ class ReplayRejected(Exception):
     """The available observation cannot reproduce this gold trajectory."""
 
 
-def configure_sft_prompt():
+def configure_sft_prompt(preopen_tools: int | None = None):
+    """Hash the exact inference prompt plus every input that changes a row.
+
+    Gold replay rows must be rendered with the same system/user template that
+    ``submission/predict.py`` uses.  The old SFT-only system prompt is gone: it
+    made training prompts differ from the final Search-First prompt.
+    """
     configure()
-    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC.prompt_schema(), CONFIG.preopen_tools, sha(REPO / "src" / "lifemate" / "catalog.py")], ensure_ascii=False, sort_keys=True)
+    pair = json.dumps(
+        [
+            prompts.discovery_system(prompts.CALLER_SYSTEM),
+            "caller_messages:discovery:default-user-template",
+            CONFIG.preopen_tools if preopen_tools is None else preopen_tools,
+            sha(REPO / "src" / "lifemate" / "catalog.py"),
+            sha(REPO / "src" / "lifemate" / "runtime.py"),
+            sha(REPO / "src" / "lifemate" / "caller.py"),
+            sha(REPO / "src" / "lifemate" / "prompts.py"),
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha256(pair.encode("utf-8")).hexdigest()
 
 
@@ -113,8 +130,6 @@ class GoldCaller(Caller):
             max_steps=config.max_steps,
             max_new_tokens=CALLER_TOKENS,
             capture_prompts=True,
-            discovery_prompt=SFT_SYSTEM_PROMPT,
-            user_template=DISCOVERY_USER_TEMPLATE,
         )
         self.config = config
         self.gold = gold
@@ -210,7 +225,7 @@ def mixed_sample(sample, entry, rng):
     return replace(sample, raw={**sample.raw, "audio_text": current, "history": history}), sources
 
 
-def prepare(transcripts_mode, full_train=False, teacher=None):
+def prepare(transcripts_mode, full_train=False, teacher=None, verified_dataset=None):
     from transformers import AutoTokenizer
 
     from lifemate.train_unsloth import encode_example
@@ -226,7 +241,30 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     reports, examples, counts = [], {"train": [], "dev": []}, Counter()
     env_factory = lambda sid: make_tool_env(root, "train", sid)
+    if verified_dataset is not None:
+        manifest = read(verified_dataset / "manifest.json")
+        path = verified_dataset / "teacher_ds.jsonl"
+        expected = dict(top_k=CONFIG.top_k, preopen_tools=CONFIG.preopen_tools,
+                        max_searches=CONFIG.max_searches, max_steps=CONFIG.max_steps, seed=SEED)
+        if (manifest["schema"] != "lifemate.teacher_ds.v1"
+                or manifest["required_replay_score"] != 1.0
+                or manifest["max_length"] != 6144
+                or manifest["config"] != expected
+                or manifest["recipe_sha256"] != prompt_sha
+                or manifest["retriever_sha256"] != sha(discovery.__file__)
+                or manifest["catalog_sha256"] != sha(catalog_path(root, "train"))
+                or manifest["transcript_sha256"] != sha(transcript_path())
+                or manifest["files"]["teacher_ds"]["sha256"] != sha(path)):
+            raise ValueError("Verified dataset does not match the current replay configuration")
+        training = list(rows(path))
+        ids = {row["sample_id"] for row in training}
+        if not training or len(training) != manifest["rows"] or ids - set(split["train"]):
+            raise ValueError("Verified dataset has invalid rows or includes ineligible IDs")
+        examples["train"] = training
+        counts["verified_dataset:rows"] = len(training)
     for group, ids in split.items():
+        if group == "train" and verified_dataset is not None:
+            continue
         for sid in ids:
             sample = by_id[sid]
             _, gold_calls, gold_hash = replay_gold(sample, env_factory)
@@ -235,11 +273,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
                 counts[f"{group}:gold_replay_mismatch"] += 1
                 continue
             rng = random.Random(f"{SEED}:{sid}")
-            config = (
-                replace(CONFIG, max_steps=rng.randint(13, 20), max_searches=6)
-                if full_train and group == "train"
-                else CONFIG
-            )
+            config = CONFIG
             variants = (
                 ("mixed",) if transcripts_mode == "mixed" and group == "train" else
                 ("gold", "gipformer")
@@ -277,7 +311,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
                             raise ReplayRejected("score_below_1")
                         if not exact_calls(result.calls, gold_calls, catalog):
                             raise ReplayRejected("gold_calls_mismatch")
-                        if any(encode_example(tokenizer, example, 4096) is None for example in caller.examples):
+                        if any(encode_example(tokenizer, example, 6144) is None for example in caller.examples):
                             raise ReplayRejected("overlength")
                     except ReplayRejected as exc:
                         status = str(exc)
@@ -290,7 +324,6 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
                 if teacher is not None and group == "train" and status not in {"kept", "overlength", "missing_gipformer"}:
                     gemini_caller = Caller(
                         teacher, catalog, max_steps=config.max_steps, capture_prompts=True,
-                        discovery_prompt=SFT_SYSTEM_PROMPT, user_template=DISCOVERY_USER_TEMPLATE,
                     )
                     result = LifeMateAgent(catalog, gemini_caller, config=config).run(incoming, env_factory(sid))
                     replay_score = score_prediction(result.calls, result.state_hash, sample.gold_calls, gold_hash, catalog)
@@ -307,7 +340,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
                     if (result.finished and not result.error and not result.notes and clean
                             and replay_score.score == 1.0 and writes(result.calls, catalog) == writes(gold_calls, catalog)
                             and len(teacher_rows) == len(result.raw_outputs)
-                            and all(encode_example(tokenizer, row, 4096) is not None for row in teacher_rows)):
+                            and all(encode_example(tokenizer, row, 6144) is not None for row in teacher_rows)):
                         status = "kept"
                         examples[group].extend(dict(row.as_row(), source="gemini") for row in teacher_rows)
                     else:
@@ -347,6 +380,11 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
     write_rows(WORK / "gold_replay_cases.jsonl", reports)
     manifest = dict(
         prompt_sha256=prompt_sha,
+        inference_prompt_sha256=hashlib.sha256(
+            prompts.discovery_system(prompts.CALLER_SYSTEM).encode("utf-8")
+        ).hexdigest(),
+        prompt_template="caller_messages(discovery=True) default user template",
+        max_length=6144,
         model=MODEL,
         e5_model=discovery.E5_MODEL_ID,
         e5_revision=discovery.E5_REVISION,
@@ -359,8 +397,8 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
         full_train=full_train,
         required_replay_score=1.0,
         gemini_model=teacher.model if teacher is not None else None,
-        train_max_searches=6 if full_train else CONFIG.max_searches,
-        train_max_steps=[13, 20] if full_train else [CONFIG.max_steps, CONFIG.max_steps],
+        train_max_searches=CONFIG.max_searches,
+        train_max_steps=[CONFIG.max_steps, CONFIG.max_steps],
         transcript_sha256=sha(transcript_path()),
         split=split,
         val_ids=val,
@@ -403,6 +441,10 @@ def train(args):
     manifest = read(WORK / "gold_replay_manifest.json")
     if manifest["prompt_sha256"] != configure_sft_prompt() or manifest["retriever_sha256"] != sha(discovery.__file__):
         raise ValueError("Prepared prompt or retriever differs from the current code")
+    if manifest.get("inference_prompt_sha256") != hashlib.sha256(
+        prompts.discovery_system(prompts.CALLER_SYSTEM).encode("utf-8")
+    ).hexdigest():
+        raise ValueError("Prepared rows were not rendered with the final inference prompt")
     if manifest.get("required_replay_score") != 1.0:
         raise ValueError("Run prepare again to enforce the 1.0 replay score gate")
     by_group = {}
@@ -428,7 +470,7 @@ def train(args):
             "--model",
             MODEL,
             "--max-length",
-            "4096",
+            "6144",
             "--rank",
             "16",
             "--learning-rate",
@@ -491,8 +533,6 @@ def eval_worker(rank, world, mode, ids, arms, cache_enabled):
                     max_new_tokens=CALLER_TOKENS,
                     max_steps=CONFIG.max_steps,
                     collect_metrics=True,
-                    discovery_prompt=SFT_SYSTEM_PROMPT,
-                    user_template=DISCOVERY_USER_TEMPLATE,
                 )
                 agent = LifeMateAgent(catalog, caller, config=CONFIG)
                 torch.cuda.synchronize(rank)
@@ -597,6 +637,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("prepare", "train", "smoke-eval", "dev", "val"))
     parser.add_argument("--transcripts", choices=("gold", "gipformer", "both", "mixed"), default="both")
+    parser.add_argument("--verified-dataset", type=Path, help="Directory containing verified teacher_ds.jsonl and manifest.json")
     parser.add_argument("--gemini-fallback", action="store_true")
     parser.add_argument("--gemini-model", default="gemini-3.5-flash-lite")
     parser.add_argument("--full-train", action="store_true", help="Prepare all eligible train IDs with a 13-20 step budget")
@@ -611,6 +652,8 @@ def main():
     parser.add_argument("--compare-base", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
+        if args.verified_dataset and (not args.full_train or args.gemini_fallback):
+            parser.error("--verified-dataset requires --full-train and uses the supplied training rows")
         teacher = None
         if args.gemini_fallback:
             from pipeline.gemini_teacher import GeminiTeacher
@@ -621,7 +664,7 @@ def main():
                  {"role": "user", "content": 'Return {"ready":true}.'}], None,
             ):
                 raise RuntimeError("Gemini preflight returned no text")
-        prepare(args.transcripts, full_train=args.full_train, teacher=teacher)
+        prepare(args.transcripts, full_train=args.full_train, teacher=teacher, verified_dataset=args.verified_dataset)
     elif args.mode == "train":
         if not 0 < args.learning_rate < 1:
             parser.error("--learning-rate must be between 0 and 1")
