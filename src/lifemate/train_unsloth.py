@@ -130,6 +130,7 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--model", default="Qwen/Qwen3.5-4B")
     p.add_argument("--revision", default="main")
+    p.add_argument("--load-in-4bit", action="store_true", help="Train LoRA on a 4-bit base model")
     p.add_argument("--max-length", type=int, default=3500)
     p.add_argument("--top-k", type=int, default=4)
     p.add_argument("--caller-max-steps", type=int, default=12)
@@ -252,7 +253,7 @@ def train_examples(args, examples, summary, local_rank=0):
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model, revision=args.revision, max_seq_length=args.max_length,
         dtype=torch.bfloat16 if bf16 else torch.float16,
-        load_in_4bit=False, load_in_16bit=True, full_finetuning=False,
+        load_in_4bit=args.load_in_4bit, load_in_16bit=not args.load_in_4bit, full_finetuning=False,
     )
     # Explicit language-only module suffixes avoid adapting the unused vision tower.
     suffixes = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",

@@ -493,12 +493,14 @@ def train(args):
             str(args.steps),
             "--save-steps",
             str(args.save_steps),
+            *(["--load-in-4bit"] if args.load_in_4bit else []),
             *(["--init-adapter", str(args.init_adapter)] if args.init_adapter else []),
         ]
     )
     summary = {group: {"examples": len(group_rows)} for group, group_rows in by_group.items()}
     summary.update(
         initialization="continued_lora" if args.init_adapter else "fresh_lora",
+        load_in_4bit=args.load_in_4bit,
         replay_manifest_sha256=sha(WORK / "gold_replay_manifest.json"),
         prompt_sha256=manifest["prompt_sha256"],
         global_batch=args.batch,
@@ -655,6 +657,7 @@ def main():
     parser.add_argument("--save-steps", type=int, default=20)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--run-tag", default="search_first")
     parser.add_argument("--init-adapter", type=Path)
     parser.add_argument("--adapter", type=Path, action="append", default=[])
