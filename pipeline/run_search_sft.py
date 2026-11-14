@@ -46,7 +46,7 @@ from lifemate.runtime import AgentConfig, LifeMateAgent, make_tool_env
 from lifemate.scoring import calls_match, replay_gold, score_prediction
 from lifemate.sft import SFTExample, caller_target_derivable
 
-CONFIG = AgentConfig(tool_discovery=True, max_searches=4, max_steps=12, top_k=discovery.SEARCH_LIMIT)
+CONFIG = AgentConfig(tool_discovery=True, max_searches=4, max_steps=12, top_k=discovery.SEARCH_LIMIT, preopen_tools=12)
 SEED = 42
 
 # Capability descriptions used by the replay teacher when a gold action needs a
@@ -99,7 +99,7 @@ class ReplayRejected(Exception):
 
 def configure_sft_prompt():
     configure()
-    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC.prompt_schema(), sha(REPO / "src" / "lifemate" / "catalog.py")], ensure_ascii=False, sort_keys=True)
+    pair = json.dumps([SFT_SYSTEM_PROMPT, DISCOVERY_USER_TEMPLATE, SEARCH_TOOL_SPEC.prompt_schema(), CONFIG.preopen_tools, sha(REPO / "src" / "lifemate" / "catalog.py")], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(pair.encode("utf-8")).hexdigest()
 
 
@@ -354,6 +354,7 @@ def prepare(transcripts_mode, full_train=False, teacher=None):
         max_searches=CONFIG.max_searches,
         max_steps=CONFIG.max_steps,
         top_k=discovery.SEARCH_LIMIT,
+        preopen_tools=CONFIG.preopen_tools,
         transcripts=transcripts_mode,
         full_train=full_train,
         required_replay_score=1.0,
@@ -581,6 +582,7 @@ def evaluate(args):
         dict(
             ids=ids,
             cache=not args.no_cache,
+            preopen_tools=CONFIG.preopen_tools,
             metrics=metrics,
             prompt_sha256=configure_sft_prompt(),
             retriever_sha256=sha(discovery.__file__),
